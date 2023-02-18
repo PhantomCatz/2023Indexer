@@ -10,20 +10,39 @@ import edu.wpi.first.wpilibj.DigitalInput;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 
+import frc.DataLogger.CatzLog;
+import frc.DataLogger.DataCollection;
+import frc.robot.Robot;
+
 import edu.wpi.first.wpilibj.TimedRobot;
 import edu.wpi.first.wpilibj.I2C;
 import edu.wpi.first.wpilibj.util.Color;
+import frc.DataLogger.DataCollection;
+
 import com.revrobotics.ColorSensorV3;
+
 
 public class CatzIndexer {
     //          SPARKMAX DEFS
-    public CANSparkMax inDexerMtrCtrl;
+    public CANSparkMax inDexerMtrCtrlFRNT;
 
-    private final int INDEXER_MC_CAN_ID        = 40;
-    private final int INDEXER_MC_CURRENT_LIMIT = 60;
+    private final int INDEXER_FRNT_MC_CAN_ID        = 1;
+    private final int INDEXER_FRNT_MC_CURRENT_LIMIT = 60;
 
-    public final double INDEXER_TESTSPEED = 0.2;
-    public final double INDEXER_TESTSPEEDOFF = 0.0;
+    public final double INDEXER_FRNT_SPEED = 0.4;
+
+
+    //
+    public final double INDEXER_SPEED_OFF = 0.0;
+    
+    //          SECOND MOTOR DEFS
+    public CANSparkMax inDexerMtrCtrlBACK;
+
+    private final int INDEXER_BACK_MC_CAN_ID        = 2;
+    private final int INDEXER_BACK_MC_CURRENT_LIMIT = 60;
+
+    public final double INDEXER_BACK_SPEED = 0.2;
+    
 
     public double ydexerShootPower = 0.0;
     public double ydexerSecondShootPower = 0.0;
@@ -59,82 +78,147 @@ public class CatzIndexer {
     double IR;
     int proximity;
 
+    //          objectdetection
     public boolean objectReady = false;
     
+    private boolean objectDetected;
+
+    private boolean objectNotInPosition;
+
+    private boolean coneTestDelay;
+
+    private boolean flipperDelay;
+    
+
+    //
     private Thread Indexer;
 
-    
+    private Timer indexerTimer;
+    private double indexerTime;
+
+    int traceID;
+
+
+    //          CONSTANTS
+    private double MAX_BELT_TIME = 4;
+
+    public CatzLog data;
     //                      End of definitions
-    CatzIndexer() {
 
-        inDexerMtrCtrl = new CANSparkMax(INDEXER_MC_CAN_ID, MotorType.kBrushless); 
+    public CatzIndexer() 
+    {
+        inDexerMtrCtrlFRNT = new CANSparkMax(INDEXER_FRNT_MC_CAN_ID, MotorType.kBrushless); 
 
-        inDexerMtrCtrl.restoreFactoryDefaults();
-        inDexerMtrCtrl.setIdleMode(IdleMode.kBrake);
-        inDexerMtrCtrl.setSmartCurrentLimit(INDEXER_MC_CURRENT_LIMIT);
+        inDexerMtrCtrlFRNT.restoreFactoryDefaults();
+        inDexerMtrCtrlFRNT.setIdleMode(IdleMode.kBrake);
+        inDexerMtrCtrlFRNT.setSmartCurrentLimit(INDEXER_FRNT_MC_CURRENT_LIMIT);
+
+        
+        inDexerMtrCtrlBACK = new CANSparkMax(INDEXER_BACK_MC_CAN_ID, MotorType.kBrushless); 
+
+        inDexerMtrCtrlBACK.restoreFactoryDefaults();
+        inDexerMtrCtrlBACK.setIdleMode(IdleMode.kBrake);
+        inDexerMtrCtrlBACK.setSmartCurrentLimit(INDEXER_BACK_MC_CURRENT_LIMIT);
+
+        indexerTimer = new Timer();
 
 
         beamBreakLFT = new DigitalInput(BEAM_BREAK_DIO_PORT_LFT);
         beamBreakRGT = new DigitalInput(BEAM_BREAK_DIO_PORT_RGT);
-        
-        
-        
-    startIndexerThread();
+
+        startIndexerThread();
+      
     }
-     void startIndexerThread() {
-    
+
+    void startIndexerThread() 
+    {
         Indexer = new Thread(() ->
         {
-        
-            while(true){
+            while(true)
+            {
+                collectColorValues(); 
 
-               collectColorBeambreakValues();
-               
 
-                if (proximity >= PROXIMITY_DISTANCE_THRESHOLD){
-                    if(RedValue <= CUBE_RED_THRESHOLD && GreenValue <= CUBE_GREEN_THRESHOLD && BlueValue >= CUBE_BLUE_THRESHOLD)
-                    {// cube
+                if (objectDetected())//if the ir detects an object has passed threshold
+                {
+                    resetFlags();
+                    if(RedValue <= CUBE_RED_THRESHOLD && GreenValue <= CUBE_GREEN_THRESHOLD && BlueValue >= CUBE_BLUE_THRESHOLD)//test color values for cube
+                    {
+                        indexerTimer.reset();
+                        indexerTimer.start();
+                        indexerTime = indexerTimer.get();//reset timer
+
                         setBeltFWD();
-                        Timer.delay(2);
-                        stopbelt();
-                        objectReady = true;
+                        while(objectNotInPosition == true)
+                        {
+                            collectBeamBreakValues();
+                            if(((beamBreakLFTVALUE == false) || (beamBreakRGTVALUE == false)) || indexerTime == MAX_BELT_TIME)//if a beambreak is broken or if the time limit is reached
+                            {
+                                stopbelt();
+                                objectReady = true; //need to communicate with claw and elevator to set this back to false
+                                objectNotInPosition = false;
+                                traceID = 3;
+                            }
+                        }
                     }
                    
-                    if(BlueValue <= CONE_BLUE_THRESHOLD)
-                    {//cone
-                        if((beamBreakLFTVALUE == true) || (beamBreakRGTVALUE == true))
+                    if(BlueValue <= CONE_BLUE_THRESHOLD)//test color values for cone
+                    {
+                        indexerTimer.reset();
+                        indexerTimer.start();
+                        indexerTime = indexerTimer.get();//reset timer
+                
+                        setBeltFWD();
+                        while(objectNotInPosition == true)
                         {
-                            setBeltFWD();
-                            Timer.delay(2);
-                            startFlipper();
-                            Timer.delay(1);
-                            setBeltREV();
-                            Timer.delay(2);
-                            stopbelt();
-                            objectReady = true;
-                            
-                        }
-                        else if((beamBreakRGTVALUE == false) && (beamBreakRGTVALUE == false))//if already in correct position
-                        {
-                            setBeltFWD();
-                            Timer.delay(2);
-                            stopbelt();
-                            objectReady = true;
+                            if(indexerTime >= MAX_BELT_TIME) //once the cone reaches the next 
+                            {
+                                stopbelt();
+                                objectNotInPosition = false;
+                                    while (coneTestDelay = true)
+                                    {
+                                        if(indexerTime >= 5.5)
+                                        {
+                                            coneTestDelay = false;
+                                            collectBeamBreakValues();
+
+                                            if((beamBreakLFTVALUE == true) || (beamBreakRGTVALUE == true))
+                                            {
+                                                startFlipper();
+                                                while(flipperDelay = true)
+                                                {
+                                                    if(indexerTime > 7)
+
+                                                        if ((beamBreakRGTVALUE == false) && (beamBreakRGTVALUE == false))
+                                                        {
+                                                            objectReady = true;
+                                                            flipperDelay = false;
+
+                                                            traceID = 1;
+                                                        }
+                                                }
+                                            }      
+                                            else if((beamBreakRGTVALUE == false) && (beamBreakRGTVALUE == false))//if already in correct position
+                                            {
+                                                    objectReady = true;
+                                                    traceID = 2;
+                                            }
+                                        }
+                                    }
+                            }
                         }
                     }
-                }
-                else
-                {
-
                 }
                 
                 SmartDashboardIndexer();
+                DataCollectionINDEXER();
             }
         });
         Indexer.start();
     }
 
-    void collectColorBeambreakValues() {
+
+    void collectColorValues() {
         detectedColor    = m_colorSensor.getColor();
         IR               = m_colorSensor.getIR();
         proximity        = m_colorSensor.getProximity();
@@ -143,33 +227,36 @@ public class CatzIndexer {
         GreenValue  = detectedColor.green;
         BlueValue   = detectedColor.blue;
 
-        beamBreakLFTVALUE = beamBreakLFT.get();
-        beamBreakRGTVALUE = beamBreakRGT.get();
-        
-
+       
     }
 
-    void setVerticalMotorsOn() {
-
+    void collectBeamBreakValues() {
+        beamBreakLFTVALUE = beamBreakLFT.get();
+        beamBreakRGTVALUE = beamBreakRGT.get();
     }
 
     void setBeltREV() {
-
+        inDexerMtrCtrlFRNT.set(-INDEXER_FRNT_SPEED);
+        inDexerMtrCtrlBACK.set(-INDEXER_BACK_SPEED);
     }
     void setBeltFWD() {
-        inDexerMtrCtrl.set(INDEXER_TESTSPEED);
+        inDexerMtrCtrlFRNT.set(INDEXER_FRNT_SPEED);
+        inDexerMtrCtrlBACK.set(INDEXER_BACK_SPEED);
+
     }
     void stopbelt() {
-        inDexerMtrCtrl.set(INDEXER_TESTSPEEDOFF);
-    }
-
-    void startVerticalMotors() {
-
-
+        inDexerMtrCtrlFRNT.set(INDEXER_SPEED_OFF);
     }
 
     void startFlipper(){
 
+    }
+
+    void resetFlags(){
+        coneTestDelay = false;
+        objectNotInPosition = true;
+        flipperDelay = true;
+        
     }
 
     void SmartDashboardIndexer(){
@@ -181,5 +268,23 @@ public class CatzIndexer {
 
     }
 
-    
+    void DataCollectionINDEXER(){
+        if (DataCollection.LOG_ID_INDEXER == DataCollection.logDataID)
+        {
+            data = new CatzLog(Robot.currentTime.get(),traceID,0,0,0,0,0,0,0,0,0,0,0,0,0,1);  
+            Robot.dataCollection.logData.add(data);
+        }
+    }
+
+    boolean objectDetected(){
+
+        if (proximity >= PROXIMITY_DISTANCE_THRESHOLD){
+            objectDetected = true;
+        }
+        else
+        {
+            objectDetected = false;
+        }
+        return objectDetected;
+    }
 }
